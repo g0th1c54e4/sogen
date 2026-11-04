@@ -1,47 +1,23 @@
-# Guest file system
+# 客户机文件系统
 
-Sogen gives the guest a file system that is a table of mounts. Each mount connects a guest path, such as `C:\` or
-`C:\out`, to a host file or directory, and has a mode: `ro` (read-only), `rw` (read-write), or, for the root drives
-only, `cow` (copy-on-write, see below). To find the mount for a guest path, Sogen uses the deepest mount point that
-contains the path. Thus a `C:\out` mount overrides the `C:\` drive for all paths below `C:\out`.
+Sogen 给客体的文件系统是一张挂载表。每个挂载把一个客体路径（比如 `C:\` 或 `C:\out`）连接到一个宿主机文件或目录，并带有一种模式：`ro`（只读）、`rw`（读写），或者仅用于根驱动器的 `cow`（写时复制，见下文）。要查找某个客体路径对应的挂载，Sogen 会使用包含该路径的最深的挂载点。因此 `C:\out` 挂载会覆盖 `C:\` 驱动器对所有位于 `C:\out` 之下的路径。
 
-With an emulation root, each single-letter directory in `<root>/filesys` becomes a drive mount. For example,
-`<root>/filesys/c` becomes `C:\`. These drives use the mode from `--root-mode`, which is `ro` by default. Without a
-root (Windows hosts only), Sogen mounts the host drives directly. The registry (`<root>/registry`) and DPAPI files
-(`<root>/dpapi`) are outside `filesys`, so the guest cannot open them. Sogen reads the DPAPI master key from the root,
-but never writes it.
+带有模拟根目录时，`<root>/filesys` 中每个单字母目录都会成为一个驱动器挂载。例如，`<root>/filesys/c` 会成为 `C:\`。这些驱动器使用 `--root-mode` 指定的模式，默认为 `ro`。没有根目录时（仅限 Windows 宿主机），Sogen 直接挂载宿主机驱动器。注册表（`<root>/registry`）和 DPAPI 文件（`<root>/dpapi`）位于 `filesys` 之外，因此客体无法打开它们。Sogen 会从根目录读取 DPAPI 主密钥，但绝不会写入它。
 
-The sandbox can also mount the root drives copy-on-write, with `--root-mode cow --root-layer DIR`. This mode needs an
-emulation root and a layer directory, and it applies only to the root drives. Guest writes to drive `C:\` go to
-`DIR/c/upper`, and its deletions are recorded in `DIR/c/state`. The layer directories use the drive letter in lower
-case. The root itself does not change. Child processes get the same layer, and a later run with the same layer sees
-the earlier changes. The Android app uses this mode with one layer per game.
+沙箱还可以用写时复制方式挂载根驱动器：`--root-mode cow --root-layer DIR`。该模式需要一个模拟根目录和一个图层目录，并且只对根驱动器生效。客体对驱动器 `C:\` 的写入会进入 `DIR/c/upper`，删除操作会记录在 `DIR/c/state` 中。图层目录使用小写的驱动器字母。根目录本身不会改变。子进程使用同一图层，之后用同一图层再运行一次可以看到先前的更改。Android 应用就是每个游戏使用一个图层。
 
-Add mounts with `--mount HOST:GUEST[:MODE]`. HOST can be a file or a directory. MODE is `ro` or `rw`. If you do not
-give MODE, the mount uses the default mode, which is `ro`. `-p GUEST HOST` is the same as `--mount HOST:GUEST`. In
-Python, use `root_mode="ro"` and `mounts=[(host, guest)]` or `mounts=[(host, guest, mode)]`.
+用 `--mount HOST:GUEST[:MODE]` 增加挂载。HOST 可以是文件或目录。MODE 为 `ro` 或 `rw`。如果不给 MODE，挂载使用默认模式 `ro`。`-p GUEST HOST` 等同于 `--mount HOST:GUEST`。在 Python 中使用 `root_mode="ro"` 和 `mounts=[(host, guest)]` 或 `mounts=[(host, guest, mode)]`。
 
-A guest write to a `ro` mount fails with `STATUS_ACCESS_DENIED`, and the host files do not change. This applies to:
+客体对 `ro` 挂载的写入会失败并返回 `STATUS_ACCESS_DENIED`，宿主机文件不会有任何变化。这适用于：
 
-- opening a file with write access,
-- creating a file or directory,
-- deleting or renaming, where both the source and the target must be writable (`rw` or `cow`),
-- all `NtSetInformationFile` classes except `FilePositionInformation` (for example times, attributes, size and
-  delete-on-close),
-- `NtSetSecurityObject` on a file handle.
+- 以写权限打开文件，
+- 创建文件或目录，
+- 删除或重命名（源和目标都必须可写，即 `rw` 或 `cow`），
+- 除 `FilePositionInformation` 之外的所有 `NtSetInformationFile` 类别（例如时间、属性、大小和 close 时删除），
+- 对文件句柄的 `NtSetSecurityObject`。
 
-Some rules apply to all mounts. The guest cannot delete or rename the root of a directory mount, but it can delete
-or rename a file mount. A rename from one drive to a different drive fails with `STATUS_NOT_SAME_DEVICE`. Sogen
-checks that a guest path stays inside its host directory by comparing the paths as text. It does not follow
-symlinks, so a symlink on the host can point outside the mount.
+有一些规则适用于所有挂载。客体不能删除或重命名目录挂载的根，但可以删除或重命名文件挂载。跨驱动器的重命名会失败并返回 `STATUS_NOT_SAME_DEVICE`。Sogen 通过文本比较路径来检查客体路径是否仍留在其宿主机目录内。它不跟随符号链接，所以宿主机上的符号链接可以指向挂载之外。
 
-The `--mount` parser splits the spec at the colons from the right. It reads MODE from the last colon, and GUEST starts
-at the drive letter. Thus HOST can contain colons, such as `C:\data` on a Windows host. Because MODE comes from the
-last colon, GUEST cannot name an NTFS alternate data stream. `--mount .\a.txt:C:\a.txt:ro` is a read-only mount of
-`C:\a.txt`, not a mount of a stream called `ro`. Other stream names, such as `C:\a.txt:data`, are rejected with an
-error. We think that nobody will mount a stream, so this limit is acceptable for a short CLI syntax. The limit applies
-only to the CLI, because Python mounts are tuples.
+`--mount` 解析器从右侧按冒号拆分规格。它从最后一个冒号读取 MODE，GUEST 从驱动器字母开始。因此 HOST 可以包含冒号，比如 Windows 宿主机上的 `C:\data`。因为 MODE 取自最后一个冒号，GUEST 不能命名 NTFS 备用数据流。`--mount .\a.txt:C:\a.txt:ro` 是 `C:\a.txt` 的只读挂载，而不是名为 `ro` 的数据流的挂载。其他流名，比如 `C:\a.txt:data`，会被拒绝并报错。我们认为没有人会挂载数据流，所以对于简短的 CLI 语法来说这个限制是可以接受的。该限制只适用于 CLI，因为 Python 中的挂载是元组。
 
-A savestate does not contain the mount table. When you load a savestate, use the same mounts again. If a file
-handle in the savestate needs write access (a write handle, delete-on-close, or a pending rename), and its mount is
-now `ro`, the load fails with an error that names the file.
+存档状态（savestate）不包含挂载表。加载存档状态时，请再次使用相同的挂载。如果存档中的某个文件句柄需要写访问（写句柄、close 时删除或挂起的重命名），而其挂载现在是 `ro`，加载会失败并报出该文件名的错误。

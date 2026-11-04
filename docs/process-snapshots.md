@@ -1,189 +1,108 @@
-# Process Snapshots — Design
+# 进程快照 — 设计
 
-Status: in progress on branch `process-snapshots`
+状态：在 `process-snapshots` 分支上进行中
 
-Goal: pause an emulated process on Android, write it to disk, and resume it later, including after
-Android killed the `:sogen` process. Development happens on desktop WHP with one vCPU; the guest-side
-code is shared with Android's single-vCPU FEX backend.
+目标：在 Android 上暂停一个被模拟的进程，把它写入磁盘，并在稍后恢复它，包括在 Android 杀掉 `:sogen` 进程之后。开发在桌面 WHP 上单 vCPU 进行；客体侧的代码与 Android 的单 vCPU FEX 后端共享。
 
-- [x] CPU/kernel snapshot from the sandbox: `--suspend-to FILE` saves on Ctrl+C, `--resume FILE`
-      continues (fd08c0ab). Snapshot code moved from the analyzer into `windows-emulator`. A process with a
-      swapchain is suspended after its next present; if none comes within two seconds it is saved where it
-      is, which is just as consistent, since GPU work is drained first and an acquired image refuses the save.
-      A second Ctrl+C stops without saving.
-- [x] Save is transactional (temporary file, moved into place; a failed save keeps the process
-      running), devices can refuse snapshots (the GPU bridge does until slice 0), the launch
-      configuration is checked on resume, and snapshot options force one vCPU.
-- [x] GPU slice 0 — headless Vulkan round-trip: instances, devices, queues, memory (host-visible and
-      device-local), buffers, images with tracked layouts, command buffers with their recorded commands,
-      fences, semaphores (`vulkan-snapshot-test`)
-- [x] GPU slice 1 — samplers, shaders, layouts, pipelines, views, render passes, framebuffers,
-      descriptor pools and sets, events, surfaces and swapchains; suspend at the end of a frame.
-      Settlers II suspends and resumes on WHP
-- [x] Query pools (occlusion, pipeline statistics, timestamps, transform feedback): results available at
-      the snapshot are served until the query is reset; command buffers whose recording used them, or a
-      restored swapchain image's undefined layout, are recorded again once that changed
-- [x] MSAA contents: sampled by a compute shader, written back per sample (stencil bit by bit) and
-      verified bit for bit on restore
-- [x] Settlers II suspended on a map and resumed in a new process
-- [x] Performance of the shadow state measured in game (below)
-- [x] Present completion: where the GPU offers `VK_EXT_swapchain_maintenance1`, the bridge enables it on the host
-      only and gives every present a fence. A swapchain is destroyed (by the guest, when it is retired, or in the
-      teardown after a snapshot) only once its presents signalled their fences. If that wait fails for another reason
-      than a lost device, the native swapchain and its fences are leaked rather than destroyed while still in use.
-      Without the extension, teardown stays best effort
-- [x] Images and swapchain images used from several queues: what each submission does to layouts, ownership
-      and queries waits until the submissions, acquires and host signals before it provide its semaphore waits,
-      so the tracked state follows the order the queues run in. Presents wait in an order of their own, since
-      they do not hold back later submissions to their queue. Ownership is tracked per subresource: an exclusive
-      image belongs to the family that first used it until a release and its matching acquire move it, and its
-      contents are copied on a queue of that family. A snapshot is refused while a modelled wait is unsatisfied or
-      a release has not been acquired
-- [ ] Several vCPUs on WHP
-- [ ] Child processes
-- [ ] Android integration
+- [x] 来自沙箱的 CPU/内核快照：`--suspend-to FILE` 在 Ctrl+C 时保存，`--resume FILE` 继续（fd08c0ab）。快照代码从 analyzer 移入 `windows-emulator`。带交换链（swapchain）的进程在其下一次 present 之后被挂起；如果两秒内没有 present，就在当前位置保存，这同样一致，因为 GPU 工作会先排空，而已获取的图像会拒绝保存。第二次 Ctrl+C 停止但不保存。
+- [x] 保存是事务性的（临时文件，然后移动到位；失败的保存保持进程继续运行），设备可以拒绝快照（GPU 桥在 slice 0 之前会拒绝），启动配置在恢复时会被检查，快照选项强制单 vCPU。
+- [x] GPU slice 0 — 无头 Vulkan 往返：实例、设备、队列、内存（host-visible 和 device-local）、缓冲、带追踪布局的图像、带已记录命令的命令缓冲、fence、信号量（`vulkan-snapshot-test`）
+- [x] GPU slice 1 — 采样器、着色器、布局、管线、视图、渲染通道、帧缓冲、描述符池和描述符集、事件、表面和交换链；在帧末挂起。
+      《工人物语 II》在 WHP 上挂起并恢复
+- [x] 查询池（遮挡、管线统计、时间戳、变换反馈）：快照时可用的结果会一直提供到查询被重置；录制时用到了它们的命令缓冲、或被恢复的交换链图像的未定义布局，在状态改变后会被重新录制一次
+- [x] MSAA 内容：通过计算着色器采样，按样本写回（模板逐位处理）并在恢复时逐位校验
+- [x] 《工人物语 II》在地图上挂起并在新进程中恢复
+- [x] 影子状态的性能已在游戏中测量（见下文）
+- [x] Present 完成：当 GPU 提供 `VK_EXT_swapchain_maintenance1` 时，桥仅在宿主机侧启用它并给每个 present 一个 fence。交换链（被客体销毁、被退役、或在快照后的拆卸中）只有在它的所有 present 都发出 fence 信号后才会被销毁。如果该等待因设备丢失以外的原因失败，本地交换链及其 fence 会被泄漏，而不是在使用中销毁。没有该扩展时，拆卸保持尽力而为
+- [x] 在多个队列中使用的图像和交换链图像：每个提交对布局、所有权和查询等待的作用，会等到各提交、获取和宿主机信号提供其信号量等待之后才确定，因此被追踪的状态遵循各队列实际运行的顺序。Present 按它们自己的顺序等待，因为它们不会阻塞对其队列的后续提交。所有权按子资源追踪：独占图像属于第一个使用它的队列族，直到一次释放及其匹配的获取把它移走，其内容会在该族的一个队列上拷贝。当存在未满足的模型化等待、或一次释放尚未被获取时，快照会被拒绝
+- [ ] WHP 上的多 vCPU
+- [ ] 子进程
+- [ ] Android 集成
 
-## Decisions
+## 决策
 
-- GPU state is in scope from the start; games are the main target.
-- Child processes are snapshotted too: the parent asks each child sandbox to save itself.
-- All resource contents are saved, including attachments, depth/stencil and MSAA images.
-- GPU objects use typed, versioned records per Vulkan object type, rebuilt through `vulkan_host`
-  helpers. Bridge IOCTLs are not replayed, since handlers have guest-visible side effects (guest VA
-  allocation, output writes, window/surface creation).
-- Steam is out of scope for now; the focus is the GPU.
-- Suspend is a user action (a Suspend button), not backgrounding: Android gives no guaranteed time
-  to write gigabytes after `onStop`.
+- GPU 状态从一开始就纳入范围；游戏是主要目标。
+- 子进程也被快照：父进程请求每个子沙箱保存自己。
+- 所有资源内容都会被保存，包括附件、深度/模板和 MSAA 图像。
+- GPU 对象使用按 Vulkan 对象类型划分的、带版本的类型化记录，通过 `vulkan_host` 辅助函数重建。不会重放桥接 IOCTL，因为处理程序有客体可见的副作用（客体 VA 分配、输出写入、窗口/表面创建）。
+- Steam 暂时超出范围；重点是 GPU。
+- 挂起是用户动作（一个挂起按钮），而不是退到后台：Android 在 `onStop` 之后不提供保证的时间来写入数 GB 数据。
 
-## What exists
+## 现状
 
-`windows_emulator::serialize` already covers registers, guest memory, modules, the syscall dispatcher,
-registry runtime state and `process_context` (threads, all handle types, windows, GDI, input, ports,
-timers). Files reopen by path, so the host setup must match: the launcher passes a description of its
-configuration (emulation root, root mode, mounts, registry directory and files, network, GPU feature
-spoofing), which is stored in the snapshot and compared on resume. Restore hooks re-create host
-windows and reattach audio and console. Registry values imported from files at launch are part of the
-saved registry overlay, so resume does not import them again; registry files are compared by path only.
+`windows_emulator::serialize` 已覆盖寄存器、客体内存、模块、系统调用分发器、注册表运行时状态和 `process_context`（线程、所有句柄类型、窗口、GDI、输入、端口、定时器）。文件按路径重新打开，所以宿主机设置必须匹配：启动器会传递其配置的描述（模拟根目录、根模式、挂载、注册表目录和文件、网络、GPU 特性欺骗），该描述存储在快照中并在恢复时比较。恢复钩子会重新创建宿主机窗口并重新连接音频和控制台。启动时从文件导入的注册表值属于被保存的注册表覆盖层的一部分，所以恢复时不会再次导入；注册表文件仅按路径比较。
 
-Verified: a Python counter interrupted at count 12 (9.5 MB snapshot) resumed at 13 with its heap
-intact; the guest clock jumped forward by the suspended time.
+已验证：一个在计数 12 处被中断的 Python 计数器（9.5 MB 快照）在 13 处恢复且堆完好；客体时钟跳过了被挂起的时长。
 
-| Area | Today | Plan |
+| 领域 | 今天 | 计划 |
 | --- | --- | --- |
-| GPU bridge | Refuses snapshots | Typed records (below) |
-| GPU memory mapped into the guest | Reservation metadata saved, contents skipped, reservation erased on restore | Bridge re-places device memory at the exact VA, saves the bytes itself |
-| Imported guest memory | Saved with guest memory | Re-imported at the recorded address |
-| Sockets (AFD) | Endpoint re-created, connection lost | Restored as reset connections |
-| Child processes | Not saved | Nested snapshots |
-| Multi-vCPU (WHP) | `serialize_state` throws | Save every vCPU; Android has one |
-| Compatibility | No per-field versioning | Header with build id and executable size/mtime; mismatches discarded |
+| GPU 桥 | 拒绝快照 | 类型化记录（见下文） |
+| 映射进客体的 GPU 内存 | 保存保留元数据，跳过内容，恢复时擦除保留 | 桥在精确的 VA 重新放置设备内存，自己保存字节 |
+| 导入的客体内存 | 随客体内存一起保存 | 在记录的地址重新导入 |
+| 套接字（AFD） | 端点被重新创建，连接丢失 | 恢复为已重置的连接 |
+| 子进程 | 不保存 | 嵌套快照 |
+| 多 vCPU（WHP） | `serialize_state` 抛出 | 保存每个 vCPU；Android 只有一个 |
+| 兼容性 | 没有逐字段版本控制 | 带构建 id 和可执行文件大小/mtime 的头部；不匹配则丢弃 |
 
-## GPU design
+## GPU 设计
 
-Vulkan cannot serialize objects. It only helps re-created objects match the originals: pipeline cache
-data, shader module identifiers, and capture/replay addresses (buffer device address, descriptor
-buffers). So every live object is re-created from its creation parameters under the bridge id the
-guest already holds.
+Vulkan 无法序列化对象。它只能帮助重新创建的对象与原始对象匹配：管线缓存数据、着色器模块标识符、以及捕获/重放地址（缓冲设备地址、描述符缓冲）。所以每个存活对象都是在客体已持有的桥接 id 下，用其创建参数重新创建的。
 
-1. **Records.** Each `*_data` entry in `vulkan_host` keeps its creation parameters as owned copies.
-   29 creation paths allocate ids today (`next_id++`).
-2. **Forced ids.** Id allocation goes through one helper. During restore it hands out the recorded
-   ids. Results are checked against the record; any mismatch fails the restore. Calls that create
-   several ids (swapchain images, physical devices) record the full set.
-3. **Order.** Instance, physical device, device, queues, memory, buffers and images, views and
-   samplers, layouts, pipelines, descriptor pools and sets, command pools and buffers, sync objects.
-4. **Tombstones.** An object destroyed while a live object still depends on its creation (shader
-   module, set layout, render pass, pipeline layout, immutable sampler) keeps its record as a
-   tombstone, created temporarily on restore and dropped with its last dependent. A final sweep
-   runs at save.
-5. **Mutable state is coalesced as it changes,** not journaled: memory bindings; the final contents
-   of each descriptor slot (writes, copies, templates, pool reset/free); command buffer state
-   (initial/recording/executable/invalid) plus the stream recorded since its last reset, moved out of
-   `handle_record_commands` rather than copied; fence, semaphore and event state read at save.
-6. **Side-effecting objects** (guest-mapped memory, imported memory, surface, swapchain) get
-   dedicated restore code.
+1. **记录。** `vulkan_host` 中每个 `*_data` 条目都把自己的创建参数保存为自有副本。今天有 29 条创建路径分配 id（`next_id++`）。
+2. **强制 id。** id 分配经过一个辅助函数。恢复期间它发放记录中的 id。结果会与记录核对；任何不匹配都会导致恢复失败。一次创建多个 id 的调用（交换链图像、物理设备）会记录完整集合。
+3. **顺序。** 实例、物理设备、设备、队列、内存、缓冲和图像、视图和采样器、布局、管线、描述符池和描述符集、命令池和命令缓冲、同步对象。
+4. **墓碑。** 一个对象在有存活对象仍依赖其创建时被销毁（着色器模块、描述符集布局、渲染通道、管线布局、不可变采样器），会保留其记录作为墓碑，恢复时临时创建并随最后一个依赖者丢弃。最终扫描在保存时运行。
+5. **可变状态在变化时合并，** 而不是记日志：内存绑定；每个描述符槽的最终内容（写入、拷贝、模板、池重置/释放）；命令缓冲状态（initial/recording/executable/invalid）加上自上次重置以来录制的流，从 `handle_record_commands` 移出而不是拷贝；fence、信号量和事件状态在保存时读取。
+6. **有副作用的对象**（客体映射内存、导入内存、表面、交换链）有专门的恢复代码。
 
-## Safe point and sync contract
+## 安全点与同步契约
 
-Agreed with sol6_1 during design review.
+与设计评审中与 sol6_1 达成的一致。
 
-- **Stop every guest thread first,** then check that no thread is inside an IOCTL.
-- **The stop takes effect after the syscall completes.** Results and the syscall return must be
-  committed before the CPU state is saved.
-- **Games arm the suspend at present.** The stop lands after the next `queue_present` IOCTL has fully
-  returned, which is a frame boundary for DXVK.
-- **Check waits before draining.** `vkDeviceWaitIdle` deadlocks on a timeline wait whose signal has
-  not been submitted. A shadow of submissions, acquires and presents decides whether every pending
-  wait (binary and timeline) can be satisfied without more guest work. If not, resume and retry at
-  the next safe point; reject after N tries.
-- **Unconsumed binary signals** are re-created on restore by an empty submit that signals them.
-- **Present completion.** Returning from present does not mean the presentation engine is done. Use
-  present fences/present wait where available; otherwise treat restore as best-effort on the same
-  device and surface, and fail when safe teardown cannot be shown.
-- **Swapchain (v1).** The real swapchain is re-created with the recorded parameters. Restore requires
-  the same image count and zero acquired images, and assumes the guest redraws every frame (re-created
-  images have undefined contents). A virtual swapchain is a later option if Android surface loss or
-  count mismatches require it; it is a larger WSI implementation (own acquire/present state,
-  semaphores, old-swapchain retirement, TRANSFER_DST support check, scaling).
-- **Transactional.** A failed save discards its temporary file and resumes the original process. A
-  failed restore reports an incompatible or incomplete snapshot and never modifies the saved file.
+- **先停止每个客体线程，** 然后检查没有线程在 IOCTL 内。
+- **停止在系统调用完成后生效。** 结果和系统调用返回值必须在 CPU 状态被保存之前提交。
+- **游戏在 present 时布防挂起。** 停止落在下一个 `queue_present` IOCTL 完全返回之后，这对 DXVK 来说就是一个帧边界。
+- **排空之前先检查等待。** `vkDeviceWaitIdle` 会在信号尚未提交的时间线等待上死锁。提交、获取和 present 的影子状态决定每个挂起的等待（二值的和时间线的）是否能在没有更多客体工作的情况下被满足。如果不能，恢复并在下一个安全点重试；重试 N 次后拒绝。
+- **未被消费的二值信号**在恢复时通过一个使它们信号的空提交来重新创建。
+- **Present 完成。** 从 present 返回并不意味着展示引擎已完成。在可用的地方使用 present fence/present wait；否则把恢复视为在同一设备和表面上的尽力而为，并在无法证明可安全拆卸时失败。
+- **交换链（v1）。** 真实的交换链用记录的参数重新创建。恢复要求相同的图像数量和零个已获取图像，并假定客体每帧都会重绘（重新创建的图像内容未定义）。如果 Android 表面丢失或数量不匹配需要，虚拟交换链是后续选项；它是一个更大的 WSI 实现（自己的获取/present 状态、信号量、旧交换链退役、TRANSFER_DST 支持检查、缩放）。
+- **事务性。** 失败的保存丢弃其临时文件并恢复原始进程。失败的恢复报告快照不兼容或不完整，且绝不修改已保存的文件。
 
-## Resource contents and layouts
+## 资源内容与布局
 
-- **Readback is capability-checked per resource.** Transfer usage is not blindly OR'd into creation
-  usage: formats and surfaces constrain it, and it can cost compression on some drivers. Resources
-  without a supported path are rejected explicitly.
-- **Buffers** by copy; **non-MSAA color images** per mip/layer; **depth/stencil** per aspect;
-  **MSAA** via shader passes (last).
-- **Layouts** are tracked per aspect, mip and layer, plus queue-family ownership, from explicit
-  barriers and render-pass initial/final transitions. Per-command-buffer effects are applied in the
-  order the semaphores impose across queues (submission order on one queue).
-- **Buffer device address** needs the full capture/replay chain from device creation (feature,
-  buffer create flag + opaque capture address, memory allocation flag + opaque address). The bridge
-  currently drops buffer creation flags. Excluded until implemented.
-- **Queries**: completed results cannot be injected into a new pool, so they are kept in a shadow and
-  answered from it (host reads, and buffer writes in place of query copies) until the query is reset.
-- **External and sparse resources** are rejected.
+- **读回按资源做能力检查。** 传输用途不会盲目 OR 进创建用途：格式和表面会限制它，而且在某些驱动上可能损失压缩。没有受支持路径的资源会被显式拒绝。
+- **缓冲**用拷贝；**非 MSAA 颜色图像**按 mip/层；**深度/模板**按方面；**MSAA** 通过着色器通道（最后）。
+- **布局**按方面、mip 和层追踪，外加队列族所有权，来自显式屏障和渲染通道的 initial/final 转换。每个命令缓冲的效果按信号量在各队列之间施加的顺序应用（单队列上按提交顺序）。
+- **缓冲设备地址**需要来自设备创建的完整捕获/重放链（特性、缓冲创建标志 + opaque capture 地址、内存分配标志 + opaque 地址）。桥目前丢弃缓冲创建标志。排除，直到实现。
+- **查询**：已完成的结果无法注入新池，所以它们保存在影子中并从中应答（宿主机读取，并就地写入缓冲以替代查询拷贝），直到查询被重置。
+- **外部和稀疏资源**被拒绝。
 
-## Milestones
+## 里程碑
 
-Slice 0 — headless, one guest queue, one submission thread:
+Slice 0 — 无头、单个客体队列、单个提交线程：
 
-- Instance, physical device, device, queue, memory (allocate and direct map), buffer, non-MSAA color
-  image, command pool/buffer, fence, semaphore.
-- Unsupported live object types reject the snapshot.
-- Test sample `vulkan-snapshot-test`: device-local buffer and image whose contents evolve every
-  iteration, a persistent mapped buffer, and a printed checksum sequence. Ctrl+C mid-loop and resume
-  must match an uninterrupted baseline, including the first iteration after resume and the exact VA
-  and bytes of the persistent mapping.
+- 实例、物理设备、设备、队列、内存（分配并直接映射）、缓冲、非 MSAA 颜色图像、命令池/缓冲、fence、信号量。
+- 不支持的存活对象类型拒绝快照。
+- 测试样本 `vulkan-snapshot-test`：内容和地址逐迭代变化的 device-local 缓冲和图像、一个持久映射缓冲，以及打印出的校验和序列。循环中按 Ctrl+C 并恢复，必须与不中断的基线一致，包括恢复后第一次迭代以及持久映射的精确 VA 和字节。
 
-Slice 1:
+Slice 1：
 
-- Swapchain and the present-armed safe point.
-- Descriptor set layout, pool and sets with coalesced slot state.
-- One graphics pipeline.
-- Tests for a resubmitted command buffer, descriptor overwrite and copy, pool reset, and a mapped
-  write made before the snapshot.
+- 交换链和 present 布防的安全点。
+- 描述符集布局、池和带合并槽状态的描述符集。
+- 一个图形管线。
+- 针对重新提交的命令缓冲、描述符覆写和拷贝、池重置，以及快照前做出的映射写入的测试。
 
-Then Settlers II (32-bit D3D9 through DXVK, WHP): suspend in game and resume.
+然后是《工人物语 II》（32 位 D3D9 经 DXVK，WHP）：在游戏中挂起并恢复。
 
-Later: more object types, MSAA, queries, BDA, multiple queues, multi-vCPU WHP, child processes, the
-Android Suspend/Resume UI.
+之后：更多对象类型、MSAA、查询、BDA、多队列、多 vCPU WHP、子进程、Android 挂起/恢复 UI。
 
-## Performance
+## 性能
 
-Normal running must not get slower. Records are written at create time only. The hot paths are
-descriptor updates (about 92% of GPU IOCTLs in MW2), coalesced into a per-slot table update, and
-command streams, kept by moving the existing vector. Layout tracking costs a map update per barrier.
-All draining and readback happens only at suspend.
+正常运行绝不能变慢。记录只在创建时写入。热路径是描述符更新（约占 MW2 中 GPU IOCTL 的 92%），合并为每槽表的更新；以及命令流，通过移动现有 vector 保留。布局追踪每次屏障付出一次 map 更新。所有排空和读回只发生在挂起时。
 
-Measured on a Settlers II map (WHP, DXVK), per 5 s of wall time: the descriptor slot shadow takes about
-0.3% (about 32k updates), keeping recorded commands about 0.25% (180k commands), switching reference
-capture about 0.3%, noting the about 700k objects those commands look up an estimated 0.3-0.4%, and the
-work at submission 0.03%. In total about 1% of wall time.
+在《工人物语 II》地图上测量（WHP、DXVK），每 5 秒墙钟时间：描述符槽影子约占 0.3%（约 32k 次更新）、保留已记录命令约 0.25%（180k 条命令）、切换引用捕获约 0.3%、记录这些命令查到的约 70 万个对象估计约 0.3-0.4%、提交时的工作 0.03%。总计约占墙钟时间的 1%。
 
-## Side findings
+## 附带发现
 
-- Python 3.14 `time.sleep` fails with WinError 50: the high-resolution waitable timer it uses is not
-  implemented.
-- Main now needs `apisetschema.dll` in the emulation root (#1577).
+- Python 3.14 `time.sleep` 报 WinError 50：它使用的高分辨率可等待定时器尚未实现。
+- Main 现在需要模拟根目录中有 `apisetschema.dll`（#1577）。

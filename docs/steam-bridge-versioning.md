@@ -1,94 +1,57 @@
-# Steam bridge — legacy interface versioning (design note)
+# Steam 桥 — 旧版接口版本管理（设计笔记）
 
-Status: **validated prototype, not yet integrated.** Captures the plan to replace the current
-legacy-version handling with a Proton/lsteamclient-style, version-exact generator built on libclang.
+状态：**已验证的原型，尚未集成。** 记录了用基于 libclang、版本精确（version-exact）的生成器替换当前旧版版本处理方案的计划，风格类似 Proton/lsteamclient。
 
-## The problem
+## 问题所在
 
-Games request the interface versions they were built against (MW2 → `SteamClient008`, `SteamUser012`,
-`SteamNetworking003`, …). The current bridge generates proxies only for the latest SDK and forwards old
-versions onto the latest wire (prefix-forwarding for appended params, `_DEPRECATED` aliasing), **stubbing**
-anything with no compatible latest twin. That loses methods: on `steamworks_sdk_105`, 60/235 methods stub —
-including `InitiateGameConnection` (IWNet auth) and the whole `ISteamNetworking` socket API.
+游戏请求它们编译时所针对的接口版本（MW2 → `SteamClient008`、`SteamUser012`、`SteamNetworking003`、…）。当前的桥只为最新 SDK 生成代理，并把旧版本转发到最新的线上格式（对追加的参数做前缀转发，用 `_DEPRECATED` 别名），**对没有兼容最新孪生方法的任何方法打桩**。这会丢失方法：在 `steamworks_sdk_105` 上，60/235 个方法被桩掉 —— 包括 `InitiateGameConnection`（IWNet 认证）和整个 `ISteamNetworking` 套接字 API。
 
-## How Proton/lsteamclient does it
+## Proton/lsteamclient 的做法
 
-One fully-generated wrapper **per interface version** (189 `.cpp` across 79 SDK snapshots). Each wrapper is
-compiled against the snapshot where that version has its exact vtable, and is a thin passthrough:
-`((ISteamNetworking*)p)->IsP2PPacketAvailable(pcubMsgSize, nChannel)`. It never stubs and never forwards.
-Because lsteamclient bridges **Windows↔Linux**, it needs 61 `struct_converters_*.cpp` for ABI differences —
-and because it's an in-process passthrough (Wine shares the address space), it does **not** need parameter
-direction info at all (it forwards guest pointers straight through).
+**每个接口版本一个完全生成的包装器**（79 个 SDK 快照共 189 个 `.cpp`）。每个包装器都针对该版本拥有精确 vtable 的那个快照编译，并且是一个简单的直通：
+`((ISteamNetworking*)p)->IsP2PPacketAvailable(pcubMsgSize, nChannel)`。它从不打桩，也从不转发。因为 lsteamclient 桥接的是 **Windows↔Linux**，它需要 61 个 `struct_converters_*.cpp` 来处理 ABI 差异 —— 而且因为它是进程内直通（Wine 共享地址空间），它完全**不需要**参数方向信息（它把客体指针直接转发过去）。
 
-## Our approach: version-exact, libclang, no struct converters
+## 我们的方案：版本精确、libclang、无结构体转换器
 
-Adopt the *technique* (not Proton's code): parse each SDK snapshot's headers with **libclang** and emit a
-version-exact guest proxy **and** host thunk per version, each compiled against its own snapshot, routing
-`dispatch(version)` to the matching version and calling the real version-exact object the host already
-fetches via `GetISteamGenericInterface`.
+采用其*技术*（而不是 Proton 的代码）：用 **libclang** 解析每个 SDK 快照的头文件，为每个版本同时生成版本精确的客体代理**和**宿主机 thunk，各自针对自己的快照编译，把 `dispatch(version)` 路由到匹配的版本，并调用宿主机已经通过 `GetISteamGenericInterface` 获取的真实版本精确对象。
 
-Two things make this *simpler* for us than for Proton:
+有两件事让我们比 Proton *更简单*：
 
-- Guest and host are both **Windows and the same version**, so struct layouts match byte-for-byte — **no
-  struct converters** (the bulk of lsteamclient).
-- We **do** need parameter directions (we marshal across the emulator IOCTL boundary, not in-process) — and
-  libclang gives them for free (below).
+- 客体和宿主机都是 **Windows 且版本相同**，所以结构体布局逐字节一致 —— **不需要结构体转换器**（lsteamclient 的大头）。
+- 我们**确实**需要参数方向（我们在模拟器 IOCTL 边界上编组，而不是进程内）—— 而 libclang 可以免费得到（见下）。
 
-This **deletes** the entire stub/forward/`_DEPRECATED`/prefix layer.
+这**删除**了整套桩/转发/`_DEPRECATED`/前缀层。
 
-### Key libclang facts (validated)
+### 关键的 libclang 事实（已验证）
 
-- The `STEAM_*` annotations (`STEAM_OUT_STRING_COUNT`, `STEAM_ARRAY_COUNT`, `STEAM_BUFFER_COUNT`, …) expand
-  to `__attribute__((annotate("out_buffer_count:cbDest;")))` **only under `-DAPI_GEN`** (see
-  `steam_api_internal.h`). Parse with `-DAPI_GEN` and each appears as an `ANNOTATE_ATTR` child of the
-  `PARM_DECL` — exactly the direction/size info we currently pull from `steam_api.json`.
-- Parse args: `-x c++ -std=c++14 -D_WIN32 -DAPI_GEN -fms-extensions -Wno-ignored-attributes
-  -target {i686,x86_64}-pc-windows-msvc -I <sdk>`, source `#include "steam_api.h"` + `steam_gameserver.h`.
-- Both current and old snapshots parse with **0 errors**; vtable order = declaration order of virtual
-  `CXX_METHOD`s; `STEAM_PRIVATE_API` methods show as non-`PUBLIC` `access_specifier`.
-- libclang is a **generate-time only** dependency: `pip install libclang` (bundles the native lib for
-  win/linux/mac). It is never a build or runtime dependency and nothing ships. Cross-target layout is a
-  `-target` flag, so a Linux dev still gets Windows layouts.
+- `STEAM_*` 注解（`STEAM_OUT_STRING_COUNT`、`STEAM_ARRAY_COUNT`、`STEAM_BUFFER_COUNT`、…）只有在 `-DAPI_GEN` 下才会展开为 `__attribute__((annotate("out_buffer_count:cbDest;")))`（见 `steam_api_internal.h`）。用 `-DAPI_GEN` 解析，每个注解都会作为 `PARM_DECL` 的一个 `ANNOTATE_ATTR` 子节点出现 —— 正是我们当前从 `steam_api.json` 提取的方向/大小信息。
+- 解析参数（已验证的调用形式）：`-x c++ -std=c++14 -D_WIN32 -DAPI_GEN -fms-extensions -Wno-ignored-attributes`
+  `-target {i686,x86_64}-pc-windows-msvc -I <sdk>`，源文件为 `#include "steam_api.h"` + `steam_gameserver.h`。
+- 当前和旧快照都以 **0 错误**解析；vtable 顺序 = 虚函数 `CXX_METHOD` 的声明顺序；`STEAM_PRIVATE_API` 方法显示为非 `PUBLIC` 的 `access_specifier`。
+- libclang 只是**生成期**依赖：`pip install libclang`（捆绑了 win/linux/mac 的原生库）。它从来不是构建或运行时依赖，也不会随任何东西发布。跨目标布局只是一个 `-target` 标志，所以 Linux 开发者也能得到 Windows 布局。
 
-### Validation (prototype front-end reusing the existing emitter/classifier)
+### 验证（复用现有发射器/分类器的原型前端）
 
-| SDK | json+regex (current) | libclang front-end |
+| SDK | json+regex（当前） | libclang 前端 |
 |---|---|---|
-| current SDK | 903 methods, 865 marshalled | 903 methods, **863 marshalled** (2 edge cases to reconcile) |
-| `sdk_105` | forward-to-latest: **60 stubbed** | version-exact: **4 stubbed (98%)** |
+| 当前 SDK | 903 个方法，865 个被编组 | 903 个方法，**863 个被编组**（2 个边界情况待对齐） |
+| `sdk_105` | 转发到最新：**60 个被桩掉** | 版本精确：**4 个被桩掉（98%）** |
 
-`ISteamUser012` and `ISteamNetworking003` go from several stubs each to **0** — every method MW2 needs is
-marshalled directly against the 1.05 headers.
+`ISteamUser012` 和 `ISteamNetworking003` 从各有几个桩变为 **0 个** —— MW2 需要的每个方法都直接针对 1.05 头文件编组。
 
-## Sourcing & licensing (the reason this is a separate decision)
+## 来源与许可（这是单独决策的原因）
 
-The headers are Valve's **Steamworks SDK**, governed by the **Steamworks SDK License** (the `LICENSE` in
-Proton's `lsteamclient` *is* that license; headers are `Copyright Valve, All rights reserved`) — **not**
-Proton's GPL. That license only permits redistributing `redistributable_bin` (the DLLs), never the headers,
-and clause 2.4 restricts reverse engineering. So:
+这些头文件是 Valve 的 **Steamworks SDK**，受 **Steamworks SDK 许可**约束（Proton 的 `lsteamclient` 中的 `LICENSE` *就是*那份许可；头文件标注 `Copyright Valve, All rights reserved`）—— **不是** Proton 的 GPL。该许可只允许再分发 `redistributable_bin`（DLL），绝不允许再分发头文件，且第 2.4 条款限制逆向工程。因此：
 
-- **Never** commit/vendor the headers or the generated (derived) code — gitignored, as today.
-- Prefer **`FetchContent` from Valve's own `ValveSoftware/Proton`** (pinned old tag with flat
-  `steamworks_sdk_*` dirs, `GIT_SHALLOW`, no submodules): the *user's* build obtains the headers directly
-  from Valve; the project ships only a URL (tool-provider, not distributor).
-- Gate the fetch behind the Steam opt-in so default/public builds pull nothing from Valve.
-- Legacy versions are **frozen**, so an older Proton tag is a correct source for them; the current version
-  comes from the official SDK.
-- The open question underpinning the bridge is statutory **interoperability** rights (EU Software
-  Directive Art. 6, which a no-RE clause can't waive; US §1201(f)) applied to a *paravirtualization* bridge
-  that forwards to genuine Steam. We consider this defensible interoperability — the bridge reimplements,
-  emulates, and circumvents nothing in Steam; it just lets a genuinely-licensed client be reached from the
-  sandbox — but the precise contract-vs-statute line is jurisdiction-dependent, so it's an open legal
-  question the project is tracking rather than a settled clearance.
+- **绝不**提交/内置头文件或生成的（派生）代码 —— 像今天一样被 gitignore。
+- 优先**从 Valve 自己的 `ValveSoftware/Proton` 做 `FetchContent`**（固定带扁平 `steamworks_sdk_*` 目录的旧 tag，`GIT_SHALLOW`，不带子模块）：由*用户*的构建直接从 Valve 获取头文件；项目本身只发布一个 URL（工具提供者，而不是分发者）。
+- 把获取放在 Steam 选择加入（opt-in）开关之后，让默认/公共构建不会从 Valve 拉取任何东西。
+- 旧版本是**冻结的**，所以较旧的 Proton tag 对它们是正确的来源；当前版本来自官方 SDK。
+- 支撑这座桥的开放问题是在法定**互操作性**权利（欧盟软件指令第 6 条，这是无逆向工程条款无法放弃的；美国 §1201(f)）适用于*半虚拟化*桥——它转发到真正的 Steam——的背景下。我们认为这是可辩护的互操作性 —— 该桥没有重新实现、模拟或绕过 Steam 中的任何东西；它只是让沙箱内一个真实持有许可的客户端能够被访问 —— 但精确的契约与法条边界因司法辖区而异，所以这是一个项目在持续跟踪的开放法律问题，而非已定论的许可。
 
-## Remaining implementation
+## 剩余实现工作
 
-1. **Front-end** (prototype: `src/tools/steam-bridge-generator/clang_frontend.py`): fold into `generate.py`,
-   dropping the `steam_api.json`/regex path.
-2. **Version-exact emit**: emit guest proxies + host thunks per version with each version's own indices;
-   route `create_proxy`/`dispatch` by version→tag; remove prefix-forwarding, `_DEPRECATED` aliasing, and
-   stubbing.
-3. **Build**: one isolated object library per version on **both** guest and host (mirror the existing
-   `steam-shim-v105` pattern), each compiled against its snapshot.
-4. **CMake**: `SOGEN_ENABLE_STEAM` option (default ON, disable-able); `FetchContent` the snapshots; run the
-   generator (needs libclang).
+1. **前端**（原型：`src/tools/steam-bridge-generator/clang_frontend.py`）：并入 `generate.py`，弃用 `steam_api.json`/regex 路径。
+2. **版本精确发射**：按版本发射带有各版本自己索引的客体代理 + 宿主机 thunk；`create_proxy`/`dispatch` 按 version→tag 路由；移除前缀转发、`_DEPRECATED` 别名和打桩。
+3. **构建**：客体和宿主机两侧每个版本一个隔离的对象库（镜像现有的 `steam-shim-v105` 模式），各自针对自己的快照编译。
+4. **CMake**：`SOGEN_ENABLE_STEAM` 选项（默认 ON，可禁用）；`FetchContent` 快照；运行生成器（需要 libclang）。

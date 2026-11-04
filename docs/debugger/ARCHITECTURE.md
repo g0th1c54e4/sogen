@@ -1,37 +1,33 @@
-# Integrated Debugger — Architecture
+# 集成调试器 — 架构
 
-Status: Phase 1 (core abstraction + design). Implemented incrementally; this
-document is the contract the later phases build against.
+状态：第 1 阶段（核心抽象 + 设计）。增量实现；本文档是后续阶段所依据的契约。
 
-## Goal
+## 目标
 
-A first-class, in-browser debugger that operates against the **real** emulator
-execution engine (Unicorn/WHP/icicle/KVM via `windows_emulator`), not a
-frontend-only mock. IDA/x64dbg/Ghidra-style UX: disassembly, registers, stack,
-memory, breakpoints, threads, call stack, modules, CFG, and a Python console.
+一个一流的、运行在浏览器内的调试器，它操作的是**真实**的模拟器执行引擎（通过 `windows_emulator` 的 Unicorn/WHP/icicle/KVM），而不是只有前端的 mock。UX 风格类似 IDA/x64dbg/Ghidra：反汇编、寄存器、堆栈、内存、断点、线程、调用栈、模块、CFG，以及一个 Python 控制台。
 
-## Reuse map (do not reinvent)
+## 复用地图（不要重复造轮子）
 
-| Concern | Existing system reused |
+| 关注点 | 复用的现有系统 |
 |---|---|
-| Single-step | `windows_emulator::start(1)` (see `x86_64_gdb_stub_handler::singlestep`) |
-| Breakpoints | `x86_64_emulator::hook_memory_execution(addr, cb)` + RAII `scoped_hook` (see `x86_64_gdb_stub_handler::set_breakpoint`) |
-| Disassembly | `disassembler` (Capstone; Intel/AT&T handles; `resolve_jump_target`) |
-| Registers | `windows_emulator::emu().read_register/write_register`, `x86_register` |
-| Memory | `memory_manager::try_read_memory`, `get_reserved_regions` (already surfaced via `GetMemoryRegions`) |
-| Modules | `module_manager::modules()`, `find_name`, `mapped_module` |
-| Threads / PC | `process_context::threads`, `active_thread`, `current_thread().current_ip` |
-| Transport | FlatBuffers event channel `events.fbs` ↔ `event_handler.cpp` |
-| Event pump (browser) | `analysis.cpp` calls `debugger::handle_events` every 0x20000 insns |
-| Client bridge | `page/src/emulator.ts` worker + id/tombstone request correlation |
-| Scripting model | existing nanobind `sogen` Python API (`src/python-bindings`) |
+| 单步执行 | `windows_emulator::start(1)`（见 `x86_64_gdb_stub_handler::singlestep`） |
+| 断点 | `x86_64_emulator::hook_memory_execution(addr, cb)` + RAII `scoped_hook`（见 `x86_64_gdb_stub_handler::set_breakpoint`） |
+| 反汇编 | `disassembler`（Capstone；Intel/AT&T 句柄；`resolve_jump_target`） |
+| 寄存器 | `windows_emulator::emu().read_register/write_register`、`x86_register` |
+| 内存 | `memory_manager::try_read_memory`、`get_reserved_regions`（已经由 `GetMemoryRegions` 暴露） |
+| 模块 | `module_manager::modules()`、`find_name`、`mapped_module` |
+| 线程 / PC | `process_context::threads`、`active_thread`、`current_thread().current_ip` |
+| 传输 | FlatBuffers 事件通道 `events.fbs` ↔ `event_handler.cpp` |
+| 事件泵（浏览器） | `analysis.cpp` 每 0x20000 条指令调用一次 `debugger::handle_events` |
+| 客户端桥 | `page/src/emulator.ts` worker + id/tombstone 请求关联 |
+| 脚本模型 | 现有的 nanobind `sogen` Python API（`src/python-bindings`） |
 
-## Components
+## 组件
 
 ```
                  ┌──────────────────────── browser ────────────────────────┐
- React debugger  │  Disasm | Regs | Stack | Mem | BP | Threads | CallStack  │
-   UI panels     │  Modules | CFG (React Flow) | Python (Monaco)            │
+ React debugger   │  Disasm | Regs | Stack | Mem | BP | Threads | CallStack   │
+   UI panels      │  Modules | CFG (React Flow) | Python (Monaco)            │
         │        └───────────────┬──────────────────────────────────────────┘
         │  typed wrappers        │ Emulator.debugCommand(kind, json) -> Promise
         ▼                        ▼
@@ -43,21 +39,14 @@ memory, breakpoints, threads, call stack, modules, CFG, and a Python console.
                               windows_emulator (emu/memory/modules/threads)
 ```
 
-- **`debug_session` (core, `src/debugger/debug_session.hpp`)** — the first-class
-  subsystem. Owns breakpoint registry, step engine, and introspection. Wraps a
-  `windows_emulator&`. Backend-agnostic: only uses `emu()` interfaces that all
-  emulator backends implement, so Unicorn/WHP/icicle/KVM behave identically.
-- **Generic command protocol** — instead of a bespoke FlatBuffers table per
-  feature, one extensible pair:
+- **`debug_session`（核心，`src/debugger/debug_session.hpp`）** —— 一等子系统。拥有断点注册表、步进引擎和自省能力。包装一个 `windows_emulator&`。后端无关：只使用所有模拟器后端都实现的 `emu()` 接口，因此 Unicorn/WHP/icicle/KVM 行为一致。
+- **通用命令协议** —— 不为每个功能做定制的 FlatBuffers 表，而是做一个可扩展的表对：
   - `DebugCommandRequest { id:uint32; kind:uint32; payload:[ubyte] }`
   - `DebugCommandResponse { id:uint32; ok:bool; payload:[ubyte] }`
-  `payload` is UTF-8 JSON (same proven approach as `GetMemoryRegionsResponse`).
-  New debugger features = new `kind` + JSON schema; **no FlatBuffers regen**.
-- **`event_handler.cpp` dispatch** — decodes `DebugCommandRequest`, routes
-  `kind` to a `debug_session` method, serializes the JSON result into
-  `DebugCommandResponse` with the same `id`.
+  `payload` 是 UTF-8 JSON（与 `GetMemoryRegionsResponse` 相同的成熟做法）。新的调试器功能 = 新的 `kind` + JSON schema；**无需重新生成 FlatBuffers**。
+- **`event_handler.cpp` 分发** —— 解码 `DebugCommandRequest`，把 `kind` 路由到 `debug_session` 方法，把 JSON 结果序列化进具有相同 `id` 的 `DebugCommandResponse`。
 
-## Command kinds (JSON sub-protocol)
+## 命令种类（JSON 子协议）
 
 ```
 0  get_registers      -> { rip, registers:{name:value(hex)} }
@@ -76,38 +65,26 @@ memory, breakpoints, threads, call stack, modules, CFG, and a Python console.
 13 read_memory {address,size}    (already covered by ReadMemoryRequest)
 ```
 
-Async stops reuse the existing pause/state machinery (`GetStateResponse`,
-`EmulationStatus`) so the UI updates are event-driven and low-latency.
+异步停止复用现有的暂停/状态机制（`GetStateResponse`、`EmulationStatus`），因此 UI 更新是事件驱动且低延迟的。
 
-## Event flow
+## 事件流
 
-1. UI action → `Emulator.debugCommand(kind, json)` → unique `id`, pending map
-   (tombstone FIFO, identical to `readMemory` correlation).
-2. Worker forwards FlatBuffers `DebugCommandRequest`.
-3. `handle_events` (pumped from the emulation loop) drains it while paused;
-   `event_handler` dispatches to `debug_session`.
-4. Response `DebugCommandResponse{id,...}` → worker → `emulator.ts` resolves the
-   promise by `id`.
-5. Execution-state changes (hit breakpoint, step complete) flip the existing
-   `emulation_state` → existing `GetStateResponse` path → React re-render.
+1. UI 动作 → `Emulator.debugCommand(kind, json)` → 唯一 `id`、pending map
+   （tombstone FIFO，与 `readMemory` 关联完全相同）。
+2. Worker 转发 FlatBuffers `DebugCommandRequest`。
+3. `handle_events`（由模拟循环驱动）在暂停时排空它；`event_handler` 分发到 `debug_session`。
+4. 响应 `DebugCommandResponse{id,...}` → worker → `emulator.ts` 按 `id` 兑现 promise。
+5. 执行状态变化（命中断点、步进完成）翻转现有的 `emulation_state` → 现有的 `GetStateResponse` 路径 → React 重新渲染。
 
-## Stepping implementation (Phase 3 contract)
+## 步进实现（第 3 阶段契约）
 
-- **step_into**: `emu().start(1)` — one instruction, then pause. Proven path
-  (`gdb_stub_handler::singlestep`). Thread-aware: step applies to
-  `current_thread()`.
-- **step_over**: decode the instruction at RIP via `disassembler`. If it is a
-  `call` (or `rep`-prefixed), set a **temporary** execute hook at
-  `RIP + insn.size`, `continue`, auto-remove on hit. Otherwise == step_into.
-- **step_out**: read return address from the stack frame
-  (`[RSP]` after prologue / via call-stack walk), temp breakpoint there,
-  `continue`.
-- **run_to**: temporary breakpoint at target, `continue`.
-- **No desync rule**: stepping never mutates persistent emulator state; temp
-  hooks are RAII (`scoped_hook`) and removed before the pause is reported.
-  All step decisions are made from a paused snapshot.
+- **step_into**：`emu().start(1)` —— 一条指令，然后暂停。成熟路径（`gdb_stub_handler::singlestep`）。线程感知：步进应用于 `current_thread()`。
+- **step_over**：通过 `disassembler` 解码 RIP 处的指令。如果是 `call`（或带 `rep` 前缀），在 `RIP + insn.size` 处设置**临时**执行钩子，`continue`，命中时自动移除。否则 == step_into。
+- **step_out**：从栈帧读取返回地址（序言后的 `[RSP]` / 通过调用栈遍历），在那里设临时断点，`continue`。
+- **run_to**：在目标处设临时断点，`continue`。
+- **不失步规则**：步进绝不修改持久的模拟器状态；临时钩子是 RAII（`scoped_hook`），在报告暂停之前移除。所有步进决策都从一个已暂停的快照做出。
 
-## Breakpoint lifecycle
+## 断点生命周期
 
 ```
 set_breakpoint(addr)
@@ -119,63 +96,33 @@ on_hit (during emulation):
 clear_breakpoint(addr) -> erase entry -> scoped_hook dtor removes emu hook
 ```
 
-Breakpoints are kept in a `utils::concurrency::container` (same as the gdb
-stub) for async-safe access between the emulation thread and command handlers.
+断点保存在 `utils::concurrency::container` 中（与 gdb stub 相同），以便模拟线程和命令处理程序之间异步安全访问。
 
-## State synchronization
+## 状态同步
 
-- Single source of truth = the live `windows_emulator`. The UI never caches
-  authoritative state; every panel reads via commands against the current
-  paused snapshot.
-- A monotonic `snapshot generation` (already used by the memory view) is
-  bumped on each fresh pause so panels/caches invalidate consistently.
-- All introspection is **read-only** and only valid while paused; commands
-  issued while running are rejected (`ok:false`) — never block emulation.
+- 唯一事实来源 = 实时的 `windows_emulator`。UI 从不缓存权威状态；每个面板都通过针对当前暂停快照的命令读取。
+- 一个单调的 `snapshot generation`（内存视图已在用）在每次新的暂停时递增，使面板/缓存一致失效。
+- 所有自省都是**只读**的，且只在暂停时有效；运行期间发出的命令被拒绝（`ok:false`）—— 绝不阻塞模拟。
 
-## Future extension points
+## 未来扩展点
 
-`debug_session` is the seam for: taint tracking (hook-driven), trace recording
-(instruction hook ring buffer), time-travel (periodic
-`memory_manager` snapshot + replay), symbolic execution (decode stream feeds an
-expression engine). None require protocol changes — only new command `kind`s.
+`debug_session` 是以下功能接缝：污点追踪（钩子驱动）、轨迹记录（指令钩子环形缓冲）、时间旅行（周期性 `memory_manager` 快照 + 重放）、符号执行（解码流馈入表达式引擎）。它们都不需要协议变更 —— 只需要新的命令 `kind`。
 
-## Python scripting integration
+## Python 脚本集成
 
-The browser Python tab does not fork the API: it drives the **same**
-`debug_session` via command `kind`s, exposing an `emu.debug.*` facade whose
-names/behavior mirror the existing nanobind `sogen` model
-(`emu.debug.breakpoint/step_into/step_over/continue_execution`,
-`emu.debug.registers.rip`, `emu.debug.disassemble(addr,n)`). Execution sandbox,
-output streaming, tracebacks, and cancellation are a dedicated phase; the
-substrate (generic command channel + `debug_session`) is designed so the Python
-layer is a thin client, not a parallel engine.
+浏览器的 Python 标签页不会分叉 API：它通过命令 `kind` 驱动**同一个** `debug_session`，暴露一个 `emu.debug.*` 门面，其名称/行为镜像现有的 nanobind `sogen` 模型（`emu.debug.breakpoint/step_into/step_over/continue_execution`、`emu.debug.registers.rip`、`emu.debug.disassemble(addr,n)`）。执行沙箱、输出流、traceback 和取消是专门的阶段；底层（通用命令通道 + `debug_session`）被设计为让 Python 层是一个瘦客户端，而不是一个并行的引擎。
 
-## Phase plan
+## 阶段计划
 
-1. **[done]** Core abstraction + this document.
-2. **[done]** Generic `DebugCommand` protocol + dispatch + read-only
-   introspection (registers/disassemble/modules/threads/callstack).
-3. **[done]** Breakpoint + step engine (into/over/out/run-to),
-   event-driven stops via the persistent control hook.
-4. **[done]** Web UI debugger shell + panels + hotkeys
-   (F5/F10/F11/Shift+F11/Ctrl+G).
-5. **[done]** CFG view (self-contained SVG, incremental from decoded
-   blocks).
-6. **[done]** Monaco editor scripting tab + `emu.debug.*` bridge to the
-   real `debug_session`.
+1. **[done]** 核心抽象 + 本文档。
+2. **[done]** 通用 `DebugCommand` 协议 + 分发 + 只读自省（寄存器/反汇编/模块/线程/调用栈）。
+3. **[done]** 断点 + 步进引擎（into/over/out/run-to），通过持久控制钩子实现事件驱动停止。
+4. **[done]** Web UI 调试器外壳 + 面板 + 热键（F5/F10/F11/Shift+F11/Ctrl+G）。
+5. **[done]** CFG 视图（自包含 SVG，从解码块增量构建）。
+6. **[done]** Monaco 编辑器脚本标签页 + 通往真实 `debug_session` 的 `emu.debug.*` 桥。
 
-## Scripting tab — honest scope
+## 脚本标签页 — 诚实的范围说明
 
-The scripting tab uses the Monaco editor and exposes an `emu` object
-whose method names/behaviour mirror the existing nanobind `sogen`
-model (`emu.debug.breakpoint/step_into/step_over/continue_execution`,
-`emu.debug.registers()`, `emu.debug.disassemble(addr, n)`,
-`emu.memory.read`). Every call drives the **real** emulator through the
-same generic command channel / `debug_session` — it is not a mock.
+脚本标签页使用 Monaco 编辑器，并暴露一个 `emu` 对象，其方法名称/行为镜像现有的 nanobind `sogen` 模型（`emu.debug.breakpoint/step_into/step_over/continue_execution`、`emu.debug.registers()`、`emu.debug.disassemble(addr, n)`、`emu.memory.read`）。每次调用都通过同一个通用命令通道 / `debug_session` 驱动**真实的**模拟器 —— 它不是 mock。
 
-The host language is JavaScript (async), not CPython: running the real
-nanobind `sogen` module in the browser needs a Python-in-WASM runtime
-(pyodide + nanobind-wasm). That runtime is a future drop-in that mounts
-behind the *identical* `emu` facade — no protocol, `debug_session`, or
-UI changes required. This keeps the integration real and correct today
-instead of shipping a fake Python interpreter.
+宿主语言是 JavaScript（异步），而不是 CPython：在浏览器中运行真实的 nanobind `sogen` 模块需要一个 WASM 中的 Python 运行时（pyodide + nanobind-wasm）。该运行时是未来的即插即用方案，挂载在*完全相同*的 `emu` 门面之后 —— 不需要协议、`debug_session` 或 UI 变更。这使集成在今天就是真实且正确的，而不是交付一个假的 Python 解释器。

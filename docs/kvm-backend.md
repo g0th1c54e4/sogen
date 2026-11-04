@@ -1,97 +1,55 @@
-# KVM backend — development notes
+# KVM 后端 — 开发笔记
 
-The Linux KVM emulator backend (`sogen::kvm`). A standalone backend that mirrors
-`whp-emulator` (the WHP backend is left untouched), selected at runtime via
-`EMULATOR_KVM=1` on Linux x86_64.
+Linux KVM 模拟器后端（`sogen::kvm`）。这是一个独立的后端，结构与 `whp-emulator` 镜像对应（WHP 后端保持不动），在 Linux x86_64 上通过环境变量 `EMULATOR_KVM=1` 在运行时选择。
 
-## Status
+## 状态
 
-`test-sample.exe` runs to completion under KVM with all 26 tests passing (exit 0) on both
-Intel and AMD hosts. Single-threaded and multi-threaded execution, paging, syscalls
-(LSTAR→HLT), exception delivery, and MMIO all work.
+`test-sample.exe` 在 KVM 下可以完整运行，全部 26 个测试通过（退出码 0），Intel 和 AMD 宿主机上都已验证。单线程和多线程执行、分页、系统调用（LSTAR→HLT）、异常投递和 MMIO 都可以工作。
 
-## Architecture
+## 架构
 
-- `kvm_x86_64_emulator.hpp` — factory `sogen::kvm::create_x86_64_emulator()`.
-- `kvm_x86_64_common.hpp` — vendored helpers (page-table walk, MMIO region lookup,
-  GP-register classification, `access_memory`); only what KVM uses.
-- `kvm_x86_64_emulator.cpp` — the backend.
+- `kvm_x86_64_emulator.hpp` — 工厂函数 `sogen::kvm::create_x86_64_emulator()`。
+- `kvm_x86_64_common.hpp` — 内置的辅助代码（页表遍历、MMIO 区域查找、通用寄存器分类、`access_memory`）；只保留 KVM 用到的部分。
+- `kvm_x86_64_emulator.cpp` — 后端本体。
 
-Guest model: 64-bit long mode, runs the Windows user process at CPL3. The backend builds
-the guest page tables itself (`pml4`, `ensure_virtual_mapping`), maps guest physical pages
-into KVM via `KVM_SET_USER_MEMORY_REGION` memslots (`rebuild_mappings`, which coalesces
-contiguous same-permission pages), and intercepts:
+客体模型：64 位长模式，Windows 用户态进程运行在 CPL3。后端自己构建客体的页表（`pml4`、`ensure_virtual_mapping`），通过 `KVM_SET_USER_MEMORY_REGION` memslot 把客体物理页映射进 KVM（`rebuild_mappings`，它会合并连续的同权限页），并拦截：
 
-- **syscalls** via `MSR_LSTAR` pointing at an internal page whose first byte is `HLT`; the
-  run loop recognizes the HLT at `syscall_hook_page_+1` and calls `handle_syscall_halt`.
-- **exceptions** via a synthetic IDT (see fix 2 below).
-- **cpuid / rdtsc / rdtscp / ud2** via `handle_pre_run_instruction`, which scans the bytes
-  at RIP before each `KVM_RUN`.
+- **系统调用**：`MSR_LSTAR` 指向一个内部页，该页首字节为 `HLT`；运行循环识别 `syscall_hook_page_+1` 处的 HLT 并调用 `handle_syscall_halt`。
+- **异常**：通过一个合成的 IDT（见下面的修复 2）。
+- **`cpuid` / `rdtsc` / `rdtscp` / `ud2`**：通过 `handle_pre_run_instruction`，在每次 `KVM_RUN` 之前扫描 RIP 处的字节。
 
-CMake gates the backend to `Linux AND NOT ANDROID AND x86_64`; `backend-selection` adds
-`backend_type::kvm` and the `EMULATOR_KVM=1` env var.
+CMake 把该后端限定为 `Linux AND NOT ANDROID AND x86_64`；`backend-selection` 会加入 `backend_type::kvm` 和 `EMULATOR_KVM=1` 环境变量。
 
-The fine-grained `hook_memory_read/write/execution/range_execution` and `hook_basic_block`
-hooks are registered for API compatibility but never fire: guest code runs natively, so
-there is no per-access/per-instruction instrumentation point short of single-stepping.
-Analyzer features that depend on them are unsupported under this backend.
+细粒度的 `hook_memory_read/write/execution/range_execution` 和 `hook_basic_block` 钩子仅为 API 兼容而注册，但永远不会触发：客体代码以原生方式运行，除了单步执行之外没有按访问/按指令插桩的切入点。依赖这些钩子的分析器功能在该后端下不受支持。
 
-## Fixes that made it work
+## 使其可用的修复
 
-1. **Preemption / hang.** The scheduler preempts a running thread every 20ms via
-   `emu().stop()` from a helper thread. The original `stop()` only set
-   `run_->immediate_exit = 1`, which was never reset (so after the first preemption every
-   `KVM_RUN` returned instantly) and is only checked at `KVM_RUN` entry (so it can't
-   interrupt a vCPU already in guest mode). Fix: reset `immediate_exit` each slice and
-   `pthread_kill` the vCPU thread with a no-op `SIGRTMIN` (installed without `SA_RESTART`)
-   so an in-flight `KVM_RUN` returns `EINTR`.
+1. **抢占 / 挂起。** 调度器每 20 ms 通过辅助线程调用 `emu().stop()` 来抢占正在运行的线程。原来的 `stop()` 只设置 `run_->immediate_exit = 1`，这个标志从未被重置（所以第一次抢占之后每次 `KVM_RUN` 都立即返回），而且只在 `KVM_RUN` 入口处被检查（所以它无法中断已进入客体模式的 vCPU）。修复：在每个时间片重置 `immediate_exit`，并用一个无操作的 `SIGRTMIN` 信号对 vCPU 线程执行 `pthread_kill`（安装时未加 `SA_RESTART`），使进行中的 `KVM_RUN` 以 `EINTR` 返回。
 
-2. **Exception interception.** KVM exposes no userspace exception-exit bitmap (unlike WHP).
-   Install an internal IDT whose 64-bit interrupt gates point at one-`HLT` stubs running at
-   CPL0 on an IST stack (via a TSS set through `KVM_SET_SREGS`). On the HLT exit the run
-   loop derives the vector from the trapping RIP, reconstructs the faulting frame from the
-   IST stack, restores the faulting context, and routes to `handle_exception`.
+2. **异常拦截。** KVM 不像 WHP 那样提供用户态的异常退出位图。安装一个内部 IDT，其 64 位中断门指向运行在 CPL0、使用 IST 栈的单 `HLT` 桩（IST 栈通过 `KVM_SET_SREGS` 设置的 TSS 提供）。在 HLT 退出时，运行循环从触发陷阱的 RIP 推导出向量，从 IST 栈重建出错现场帧，恢复出错现场，并路由到 `handle_exception`。
 
-3. **MMIO / SSE.** KVM services MMIO by emulating the faulting instruction, and its
-   in-kernel emulator lacks SSE/AVX (ntdll runs a vectorized `wcslen` over
-   `KUSER_SHARED_DATA`). Fix: back MMIO pages with a **read-only memslot** seeded from the
-   read callback and refreshed before each guest entry (`refresh_mmio_pages`), so reads
-   execute natively and only writes trap.
+3. **MMIO / SSE。** KVM 通过模拟出错指令来服务 MMIO，而其内核内模拟器缺少 SSE/AVX 支持（ntdll 会对 `KUSER_SHARED_DATA` 执行向量化的 `wcslen`）。修复：MMIO 页由**只读 memslot** 支撑，内容由读取回调填充并在每次进入客体前刷新（`refresh_mmio_pages`），这样读取以原生方式执行，只有写入会陷入。
 
-4. **Syscall-return RIP advance.** `handle_syscall_halt` only advanced RIP past the syscall
-   when the handler left RIP unchanged, but `dispatch_callback`'s instrumentation-callback
-   redirect sets RIP to `callback - 2` expecting the syscall length added back. Always
-   advance by 2 in the non-skip branch (matching WHP), otherwise a redirected thread
-   resumed two bytes early.
+4. **系统调用返回的 RIP 前进。** `handle_syscall_halt` 只有在处理程序保持 RIP 不变时才会把 RIP 前进过 syscall 指令，但 `dispatch_callback` 的插桩回调重定向会把 RIP 设置为 `callback - 2`，期望再加回 syscall 长度。在非跳过分支中始终前进 2（与 WHP 一致），否则被重定向的线程会提前两字节恢复执行。
 
-5. **AMD: pending exception re-injection.** After the synthetic IDT delivers an exception
-   and we rewind to the faulting context, KVM still holds a pending exception in
-   `kvm_vcpu_events`. On AMD (SVM) it is re-injected on the next entry → triple fault
-   (`KVM_EXIT_SHUTDOWN`); Intel tolerates it. Clear `kvm_vcpu_events` after handling an
-   exception. This is the KVM analog of the WHP backend's AMD fix (PR #808).
+5. **AMD：挂起异常的重新注入。** 合成 IDT 投递异常并回退到出错现场之后，KVM 仍在 `kvm_vcpu_events` 中保留一个挂起的异常。在 AMD（SVM）上，它会在下一次进入时重新注入 → 三重故障（`KVM_EXIT_SHUTDOWN`）；Intel 对此可以容忍。处理完异常后清除 `kvm_vcpu_events`。这就是 WHP 后端 AMD 修复（PR #808）在 KVM 上的对应版本。
 
-6. **Breakpoint RIP off-by-one.** int3 is a trap, so the CPU pushes `int3 + 1`. The
-   emulator's exception dispatch expects RIP at the int3 (for `ExceptionAddress` and the
-   int-2Dh debug-service pattern), as the instruction-precise backends report. Rewind RIP
-   by one for `#BP` in the trap handler.
+6. **断点 RIP 差一。** int3 是陷阱，所以 CPU 压入的是 `int3 + 1`。模拟器的异常分发期望 RIP 位于 int3 处（用于 `ExceptionAddress` 和 int-2Dh 调试服务模式），这与按指令精确的后端所报告的一致。在陷阱处理程序中对 `#BP` 把 RIP 回退一个字节。
 
-Fixes 5 and 6 only reproduce with the Windows 2022 emulation root (a different ntdll than
-some local roots), and fix 5 only on AMD.
+修复 5 和 6 只在 Windows 2022 模拟根目录下复现（其 ntdll 与某些本地根目录不同），修复 5 只在 AMD 上复现。
 
-## Build & test (Docker, from a Windows host)
+## 构建与测试（Docker，从 Windows 宿主机）
 
-KVM cannot build or run on Windows. Use Docker Desktop (WSL2 backend); nested virtualization
-is on by default, so `/dev/kvm` is available with `--device /dev/kvm`.
+KVM 无法在 Windows 上构建或运行。使用 Docker Desktop（WSL2 后端）；嵌套虚拟化默认开启，因此加上 `--device /dev/kvm` 就可以使用 `/dev/kvm`。
 
-Build image:
+构建镜像：
 
 ```dockerfile
 FROM gcc:14
 RUN apt-get update -qq && apt-get install -y -qq cmake ninja-build linux-libc-dev >/dev/null
 ```
 
-Configure (separate build dir `build/linux`), disabling Rust/Python and using vendored SDL
-in console mode:
+配置（单独的构建目录 `build/linux`），禁用 Rust/Python 并以控制台模式使用内置 SDL：
 
 ```sh
 docker run --rm -v "<repo>:/src" -w /src sogen-kvm-build \
@@ -102,8 +60,7 @@ docker run --rm -v "<repo>:/src" -w /src sogen-kvm-build \
     -DSOGEN_ENABLE_LTO=OFF -DSOGEN_BUILD_TOOLS=ON
 ```
 
-Build and run (`kvm-emulator` is a shared lib the analyzer loads, so it can be rebuilt
-alone for fast iteration):
+构建并运行（`kvm-emulator` 是 analyzer 加载的共享库，因此可以单独重建以便快速迭代）：
 
 ```sh
 docker run --rm -v "<repo>:/src" -w /src sogen-kvm-build \
@@ -114,17 +71,13 @@ docker run --rm --device /dev/kvm -v "<repo>:/src" -w /src/build/linux/artifacts
   env EMULATOR_KVM=1 ./analyzer -s -e /src/build/linux/artifacts/root c:/test-sample.exe
 ```
 
-Notes:
-- A Windows emulation root is at `build/linux/artifacts/root` (generated on Windows; CI
-  generates it and the Linux jobs download it). `-s` is silent mode; drop it for the
-  verbose syscall log.
-- `clang-format` is not in the base image; run it on the host instead.
-- The unicorn backend (omit `EMULATOR_KVM`) runs the same sample to completion and is the
-  reference for trace diffing.
-- AMD-specific issues may need an AMD host (a GitHub AMD runner / a physical AMD box);
-  the Docker-built Linux binaries also run directly on a bare-metal Linux box.
+注意事项：
 
-### Windows-path gotcha for Docker on Git Bash
+- Windows 模拟根目录位于 `build/linux/artifacts/root`（在 Windows 上生成；CI 会生成它，Linux 任务会下载它）。`-s` 是静默模式；去掉它以查看详细的系统调用日志。
+- 基础镜像中没有 `clang-format`；改为在宿主机上运行。
+- unicorn 后端（省略 `EMULATOR_KVM`）可以让同一样本完整运行，是用作 trace 对比的参照。
+- AMD 相关的问题可能需要在 AMD 宿主机上复现（GitHub 的 AMD runner / 一台实体 AMD 机器）；Docker 构建的 Linux 二进制也可以直接在裸机 Linux 上运行。
 
-Bind-mount paths must be Windows-style; prefix with `MSYS_NO_PATHCONV=1` so Git Bash does
-not mangle them, e.g. `MSYS_NO_PATHCONV=1 docker run ... -v "C:\path\to\repo:/src" ...`.
+### Git Bash 上 Docker 的 Windows 路径陷阱
+
+绑定挂载路径必须是 Windows 风格；要加上 `MSYS_NO_PATHCONV=1` 前缀，防止 Git Bash 改写路径，例如 `MSYS_NO_PATHCONV=1 docker run ... -v "C:\path\to\repo:/src" ...`。
