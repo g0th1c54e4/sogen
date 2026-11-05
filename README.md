@@ -7,13 +7,13 @@
 	<img src="https://img.shields.io/github/commit-activity/m/momo5502/sogen?color=FF3131"/>
 </h1>
 
-Sogen runs Windows, Linux and [macOS](#macos-programs-rudimentary) programs, without a real operating system: It lets you see and control everything they do.
+Sogen 无需真实操作系统即可运行 Windows、Linux 和 [macOS](#macos-程序初步支持) 程序：它让你看到并控制它们所做的一切。
 
-Instead of reimplementing thousands of OS APIs, Sogen emulates binaries at CPU and syscall level and runs the **real system DLLs**, so behavior closely matches the real OS.
+Sogen 不重写数千个 OS API，而是在 CPU 和系统调用层级模拟二进制程序并运行**真实的系统 DLL**，因此行为与真实 OS 高度一致。
 
-Every instruction, memory access and API call can be hooked, inspected or rewritten, runs are fully deterministic, and the entire emulator state can be snapshotted and restored.
+每条指令、每次内存访问和每个 API 调用都可以被挂钩、检查或改写；运行完全确定，且整个模拟器状态可快照并恢复。
 
-Built in C++ and powered by the CPU backend of your choice:
+基于 C++ 构建，由你选择的 CPU 后端驱动：
 
 - [Unicorn Engine](https://github.com/unicorn-engine/unicorn)
 - [icicle-emu](https://github.com/icicle-emu/icicle-emu)
@@ -21,61 +21,61 @@ Built in C++ and powered by the CPU backend of your choice:
 - [KVM](https://www.kernel.org/doc/html/latest/virt/kvm/api.html)
 - [FEX](https://fex-emu.com)
 
-Try it out: <a href="https://sogen.dev">sogen.dev</a>  
-Join the community: <a href="https://discord.sogen.dev">Discord</a>  
+在线试用：<a href="https://sogen.dev">sogen.dev</a>  
+加入社区：<a href="https://discord.sogen.dev">Discord</a>  
 &nbsp;  
 
-## Key Features
+## 核心特性
 
-- **Real system DLLs**: runs the actual ntdll, kernel32 and user32, not reimplemented stubs
-- **Hook & rewrite**: intercept and change memory, instructions, syscalls and API calls
-- **Faithful Windows internals**: PE loading (relocations, TLS), Windows memory types, SEH, threading, the registry, filesystem and networking
-- **Snapshot & restore**: full state serialization, fast in-memory snapshots and minidump loading
-- **Runs everywhere**: Windows, Linux, macOS, Android, iOS and the browser, on x86-64 and arm64
-- **Deterministic**: every run is reproducible, down to the instruction  
+- **真实系统 DLL**：运行真实的 ntdll、kernel32 和 user32，而非重写的桩
+- **挂钩与改写**：拦截并修改内存、指令、系统调用和 API 调用
+- **忠实的 Windows 内部机制**：PE 加载（重定位、TLS）、Windows 内存类型、SEH、线程、注册表、文件系统和网络
+- **快照与恢复**：完整状态序列化、快速内存内快照和 minidump 载入
+- **处处可运行**：Windows、Linux、macOS、Android、iOS 和浏览器，支持 x86-64 和 arm64
+- **确定性**：每次运行都可复现，精确到指令  
 &nbsp;  
 
-## Preview
+## 预览
 
 <img src="https://momo5502.com/sogen/preview.svg" width="650" alt="Preview" />
 
-## Undetectable Debugging
+## 不可检测的调试
 
-Debug with the tools you already know, like IDA Pro or GDB, over the GDB protocol, or use the built-in in-browser debugger.  
-The debugger runs at the emulator level, outside the process, so it stays invisible to anti-debug checks.
+用你已经熟悉的工具（如 IDA Pro 或 GDB）通过 GDB 协议调试，或使用内置的浏览器内调试器。  
+调试器运行在模拟器层、进程之外，因此对反调试检查不可见。
 
 <img src="https://momo5502.com/sogen/debugger.png" width="650" alt="Debugging a process running in Sogen from an IDA Pro remote GDB session" />
 &nbsp;  
 
-## Run Games in a Sandbox
+## 在沙箱中运行游戏
 
-Native GUI apps run, with working windows, dialogs and controls.  
-GPU paravirtualization enables 3D acceleration on your real GPU, while the Hyper-V backend runs the code natively on your CPU. Fast enough for games.  
-Direct3D 8/9/10/11 titles run through [DXVK](https://github.com/doitsujin/dxvk), which translates Direct3D to Vulkan on top of the GPU bridge.
+原生 GUI 应用可运行，窗口、对话框和控件都可用。  
+GPU 半虚拟化让你的真实 GPU 提供 3D 加速，Hyper-V 后端在你的 CPU 上原生运行代码，快到能玩游戏。  
+Direct3D 8/9/10/11 游戏经由 [DXVK](https://github.com/doitsujin/dxvk) 运行，它在 GPU 桥之上把 Direct3D 翻译为 Vulkan。
 
 <img src="https://momo5502.com/sogen/game.png" width="650" alt="A game running inside the Sogen emulator" />
 &nbsp;  
 
-## Project Overview
+## 项目概览
 
 <a href="https://www.youtube.com/watch?v=wY9Q0DhodOQ" target="_blank">
   <img src="https://momo5502.com/sogen/video.png" alt="YouTube Video" width="600" />
 </a>
 
-Click <a href="https://docs.google.com/presentation/d/1pha4tFfDMpVzJ_ehJJ21SA_HAWkufQBVYQvh1IFhVls/edit">here</a> for the slides.  
+点击<a href="https://docs.google.com/presentation/d/1pha4tFfDMpVzJ_ehJJ21SA_HAWkufQBVYQvh1IFhVls/edit">此处</a>查看幻灯片。  
 &nbsp;  
 
-## Python Bindings
+## Python 绑定
 
-Install with:
+安装：
 
 ```bash
 pip install sogen
 ```
 
-Python bindings require an emulation root. You can download a ready-made root [here](https://sogen.dev/root.zip), or create your own by following the instructions in the [wiki](https://github.com/momo5502/sogen/wiki/Run-The-Emulator#emulation-root-environment).
+Python 绑定需要一个模拟根目录。可以[在此](https://sogen.dev/root.zip)下载现成的 root，或按照 [wiki](https://github.com/momo5502/sogen/wiki/Run-The-Emulator#emulation-root-environment) 中的说明创建自己的 root。
 
-Example:
+示例：
 
 ```python
 import sogen
@@ -92,69 +92,66 @@ emu.start()
 print(emu.process.exit_status)
 ```
 
-See `examples/python/README.md` for setup details and a larger example.  
+设置细节和更大的示例见 `examples/python/README.md`。  
 &nbsp;  
 
-## Unofficial Bindings
+## 非官方绑定
 
-[Dart bindings](https://github.com/Wdestroier/sogen_dart) are available in a separate repository.  
+[Dart 绑定](https://github.com/Wdestroier/sogen_dart)在单独的仓库中提供。  
 &nbsp;  
 
-## Quick Start (Windows + Visual Studio)
+## 快速开始（Windows + Visual Studio）
 
 > [!TIP]  
-> Checkout the [Wiki](https://github.com/momo5502/sogen/wiki) for more details on how to build & run the emulator on Windows, Linux, macOS, ...
+> 查看 [Wiki](https://github.com/momo5502/sogen/wiki) 了解如何在 Windows、Linux、macOS 等平台上构建和运行模拟器的更多细节
 
-1\. Checkout the code:
+1\. 检出代码：
 
 ```bash
 git clone --recurse-submodules https://github.com/momo5502/sogen.git
 ```
 
-2\. Run the following command in an x64 Development Command Prompt in the cloned directory:
+2\. 在克隆目录中的 x64 Developer Command Prompt 里运行以下命令：
 
 ```bash
 cmake --preset=vs2022
 ```
 
-3\. Build the solution that was generated at `build/vs2022/sogen.sln`
+3\. 构建生成在 `build/vs2022/sogen.sln` 的解决方案
 
-4\. Create a registry dump by running the [grab-registry.bat](https://github.com/momo5502/sogen/blob/main/src/tools/grab-registry.bat) as administrator and place it in the artifacts folder next to the `analyzer.exe`
+4\. 以管理员身份运行 [grab-registry.bat](https://github.com/momo5502/sogen/blob/main/src/tools/grab-registry.bat) 创建注册表转储，并把它放到 `analyzer.exe` 旁边的 artifacts 目录中
 
-5\. Run the program of your choice:
+5\. 运行你选择的程序：
 
 ```bash
 analyzer.exe C:\example.exe
 ```
 
-By default, the guest has no access to the host network. Guest sockets use an in-process loopback, DNS queries resolve to no addresses, and the Steam bridge is disabled. To give the guest access to the host network, add `--network live`:
+默认情况下，客体无法访问宿主机网络。客体套接字使用进程内回环，DNS 查询解析为空地址，且 Steam 桥被禁用。要让客体访问宿主机网络，加 `--network live`：
 
 ```bash
 analyzer.exe --network live C:\example.exe
 ```
 
-The guest file system is read-only by default, and guest writes fail with `STATUS_ACCESS_DENIED`. Use
-`--root-mode rw` to let the guest change the emulation root, or the host drives when no root is set. Use
-`--mount HOST:GUEST[:MODE]` to add a host file or directory at a guest path, for example
-`--mount .\out:C:\out:rw`. See [docs/filesystem.md](docs/filesystem.md) for the details of mounts and modes.
+客体文件系统默认只读，客体写入失败并返回 `STATUS_ACCESS_DENIED`。用 `--root-mode rw` 允许客体修改模拟根目录（未设置根目录时为宿主机驱动器）。用 `--mount HOST:GUEST[:MODE]` 在客体路径挂载宿主机文件或目录，例如 `--mount .\out:C:\out:rw`。挂载与模式的细节见 [docs/filesystem.md](docs/filesystem.md)。
 
-Windows ARM64 executables run the same way, from an emulation root created with [create-root.bat](https://github.com/momo5502/sogen/blob/main/src/tools/create-root.bat) on a Windows ARM64 machine. They run on WHP on Windows ARM64, on Hypervisor.framework on Apple Silicon and on Unicorn elsewhere.
+Windows ARM64 可执行文件以同样方式运行，使用在 Windows ARM64 机器上用 [create-root.bat](https://github.com/momo5502/sogen/blob/main/src/tools/create-root.bat) 创建的模拟根目录。它们在 Windows ARM64 上走 WHP，在 Apple Silicon 上走 Hypervisor.framework，在其他地方走 Unicorn。
 
-`--backend` overrides environment-based selection. Outside Windows ARM64, where Unicorn's ARM64 backend is not built, `EMULATOR_UNICORN=1` runs ARM64 guests on Unicorn instead of the hypervisor.
+`--backend` 覆盖基于环境变量的后端选择。在 Windows ARM64 之外，如果未构建 Unicorn 的 ARM64 后端，`EMULATOR_UNICORN=1` 会让 ARM64 客体运行在 Unicorn 上而不是 hypervisor 上。
 
-## macOS Programs (Rudimentary)
+## macOS 程序（初步支持）
 
-macOS support is at an early stage. Sogen runs x86-64 macOS command-line programs through the real dyld and the system's dyld shared cache, which is enough for simple tools like `echo`. Most other programs still stop at an unimplemented syscall.
+macOS 支持处于早期阶段。Sogen 通过真实的 dyld 和系统的 dyld 共享缓存运行 x86-64 macOS 命令行程序，足以运行 `echo` 这类简单工具。大多数其他程序仍会停在某个未实现的系统调用上。
 
-1\. Build an emulation root on a Mac whose system still ships x86-64 slices. The script copies dyld, `/bin/echo` and the x86-64 shared cache:
+1\. 在系统仍附带 x86-64 slice 的 Mac 上构建模拟根目录。该脚本会拷贝 dyld、`/bin/echo` 和 x86-64 共享缓存：
 
 ```bash
 src/tools/create-macos-root.sh /tmp/macos-root
 ```
 
-The macOS license does not allow redistributing the root or running it on non-Apple hardware, so it is not available for download and must stay on the Mac that built it.
+macOS 许可不允许再分发 root，也不允许在非 Apple 硬件上运行它，因此它无法下载，必须留在构建它的那台 Mac 上。
 
-2\. Run a program from the root by setting `EMULATOR_MACOS=1`:
+2\. 设置 `EMULATOR_MACOS=1`，从 root 运行程序：
 
 ```bash
 EMULATOR_MACOS=1 build/release/artifacts/analyzer --root /tmp/macos-root /tmp/macos-root/bin/echo hello
